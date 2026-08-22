@@ -57,6 +57,27 @@ INVALID_SECTIONS = [
 ]
 
 
+# --- BMC-v5 fix 2026-08-22 -------------------------------------------------
+# A stage file is an ORDINAL-prefixed prompt (01-foo.md). An ISO-date-prefixed
+# name (2026-08-21-foo.md) is a dated DOCUMENT, not a stage, and such names
+# occur inside worked examples in skill bodies. Treating them as stage
+# references produced a false `missing-stage` CRITICAL against three healthy
+# skills; any critical forces grade=poor, so the phantom graded them POOR.
+# Applied to BOTH the reference pattern and the on-disk predicate so the two
+# halves agree. The lookBEHIND is load-bearing: a lookahead alone guards
+# only offset 0, so the engine retried at offset 1 and matched
+# `026-08-21-...`, which is not a date shape. Caught by the negative
+# control, not by review.
+# If only one half were fixed, the mismatch would emit phantom
+# `orphaned-stage` findings instead of phantom `missing-stage` ones.
+_ISO_DATE_PREFIX = re.compile(r'^\d{4}-\d{2}-\d{2}-')
+
+
+def _is_stage_filename(name: str) -> bool:
+    """True for an ordinal-prefixed stage file, False for a dated document."""
+    return bool(re.match(r'^\d+-', name)) and not _ISO_DATE_PREFIX.match(name)
+# ---------------------------------------------------------------------------
+
 def parse_frontmatter(content: str) -> tuple[dict | None, list[dict]]:
     """Parse YAML frontmatter and validate."""
     findings = []
@@ -214,13 +235,13 @@ def cross_reference_stages(skill_path: Path, skill_content: str) -> tuple[dict, 
     # Get actual numbered prompt files at skill root (exclude SKILL.md)
     actual_files = set()
     for f in skill_path.iterdir():
-        if f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and re.match(r'^\d+-', f.name):
+        if f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and _is_stage_filename(f.name):
             actual_files.add(f.name)
 
     # Find stage references in SKILL.md — look for both old prompts/ style and new root style
     referenced = set()
     # Match `prompts/XX-name.md` (legacy) or bare `XX-name.md` references
-    ref_pattern = re.compile(r'(?:prompts/)?(\d+-[^\s)`]+\.md)')
+    ref_pattern = re.compile(r'(?:prompts/)?(?<![\d-])(?!\d{4}-\d{2}-\d{2}-)(\d+-[^\s)`]+\.md)')
     for m in ref_pattern.finditer(skill_content):
         referenced.add(m.group(1))
 
@@ -281,7 +302,7 @@ def check_prompt_basics(skill_path: Path) -> tuple[list[dict], list[dict]]:
     # Look for numbered prompt files at skill root
     prompt_files = sorted(
         f for f in skill_path.iterdir()
-        if f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and re.match(r'^\d+-', f.name)
+        if f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and _is_stage_filename(f.name)
     )
     if not prompt_files:
         return prompt_details, findings
@@ -334,7 +355,7 @@ def check_prompt_basics(skill_path: Path) -> tuple[list[dict], list[dict]]:
 
 def detect_workflow_type(skill_content: str, has_prompts: bool) -> str:
     """Detect workflow type from SKILL.md content."""
-    has_stage_refs = bool(re.search(r'(?:prompts/)?\d+-\S+\.md', skill_content))
+    has_stage_refs = bool(re.search(r'(?:prompts/)?(?<![\d-])(?!\d{4}-\d{2}-\d{2}-)\d+-\S+\.md', skill_content))
     has_routing = bool(re.search(r'(?i)(rout|stage|branch|path)', skill_content))
 
     if has_stage_refs or (has_prompts and has_routing):
@@ -390,7 +411,7 @@ def scan_workflow_integrity(skill_path: Path) -> dict:
 
     # Workflow type
     has_prompts = any(
-        f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and re.match(r'^\d+-', f.name)
+        f.is_file() and f.suffix == '.md' and f.name != 'SKILL.md' and _is_stage_filename(f.name)
         for f in skill_path.iterdir()
     )
     workflow_type = detect_workflow_type(skill_content, has_prompts)
